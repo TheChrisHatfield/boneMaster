@@ -275,18 +275,29 @@ ccl_device_noinline void kernel_volume_shadow(KernelGlobals *kg,
 /* Equi-angular sampling as in:
  * "Importance Sampling Techniques for Path Tracing in Participating Media" */
 
-ccl_device float kernel_volume_equiangular_sample(Ray *ray, float3 light_P, float xi, float *pdf)
+ccl_device float kernel_volume_equiangular_sample(
+    KernelGlobals *kg, const Ray *ray, const LightSample *ls, float xi, float *pdf)
 {
   float t = ray->t;
 
-  float delta = dot((light_P - ray->P), ray->D);
-  float D = safe_sqrtf(len_squared(light_P - ray->P) - delta * delta);
+  float delta = dot((ls->P - ray->P), ray->D);
+  float D = safe_sqrtf(len_squared(ls->P - ray->P) - delta * delta);
   if (UNLIKELY(D == 0.0f)) {
     *pdf = 0.0f;
     return 0.0f;
   }
-  float theta_a = -atan2f(delta, D);
-  float theta_b = atan2f(t - delta, D);
+
+  float t_near = 0.0f;
+  float t_far = t;
+
+  if (!kernel_light_clip_ray(kg, ray, ls, &t_near, &t_far)) {
+    *pdf = 0.0f;
+    return 0.0f;
+  }
+
+  float theta_a = -atan2f(delta - t_near, D);
+  float theta_b = atan2f(t_far - delta, D);
+
   float t_ = D * tanf((xi * theta_b) + (1 - xi) * theta_a);
   if (UNLIKELY(theta_b == theta_a)) {
     *pdf = 0.0f;
@@ -297,10 +308,13 @@ ccl_device float kernel_volume_equiangular_sample(Ray *ray, float3 light_P, floa
   return min(t, delta + t_); /* min is only for float precision errors */
 }
 
-ccl_device float kernel_volume_equiangular_pdf(Ray *ray, float3 light_P, float sample_t)
+ccl_device float kernel_volume_equiangular_pdf(KernelGlobals *kg,
+                                               const Ray *ray,
+                                               const LightSample *ls,
+                                               float sample_t)
 {
-  float delta = dot((light_P - ray->P), ray->D);
-  float D = safe_sqrtf(len_squared(light_P - ray->P) - delta * delta);
+  float delta = dot((ls->P - ray->P), ray->D);
+  float D = safe_sqrtf(len_squared(ls->P - ray->P) - delta * delta);
   if (UNLIKELY(D == 0.0f)) {
     return 0.0f;
   }
@@ -308,8 +322,17 @@ ccl_device float kernel_volume_equiangular_pdf(Ray *ray, float3 light_P, float s
   float t = ray->t;
   float t_ = sample_t - delta;
 
-  float theta_a = -atan2f(delta, D);
-  float theta_b = atan2f(t - delta, D);
+  float t_near = 0.0f;
+  float t_far = t;
+
+
+  if (!kernel_light_clip_ray(kg, ray, ls, &t_near, &t_far)) {
+    return 0.0f;
+  }
+
+  float theta_a = -atan2f(delta - t_near, D);
+  float theta_b = atan2f(t_far - delta, D);
+
   if (UNLIKELY(theta_b == theta_a)) {
     return 0.0f;
   }
@@ -422,6 +445,7 @@ ccl_device int kernel_volume_sample_channel(float3 albedo,
 ccl_device VolumeIntegrateResult
 kernel_volume_integrate_homogeneous(KernelGlobals *kg,
                                     ccl_addr_space PathState *state,
+                                    ccl_global float *buffer,
                                     Ray *ray,
                                     ShaderData *sd,
                                     PathRadiance *L,
@@ -504,7 +528,7 @@ kernel_volume_integrate_homogeneous(KernelGlobals *kg,
     float3 transmittance = volume_color_transmittance(coeff.sigma_t, ray->t);
     float3 emission = kernel_volume_emission_integrate(
         &coeff, closure_flag, transmittance, ray->t);
-    path_radiance_accum_emission(kg, L, state, *throughput, emission);
+    path_radiance_accum_emission(kg, L, state, buffer, *throughput, emission, LIGHTGROUPS_NONE);
   }
 
   /* modify throughput */
@@ -530,6 +554,7 @@ kernel_volume_integrate_homogeneous(KernelGlobals *kg,
 ccl_device VolumeIntegrateResult
 kernel_volume_integrate_heterogeneous_distance(KernelGlobals *kg,
                                                ccl_addr_space PathState *state,
+                                               ccl_global float *buffer,
                                                Ray *ray,
                                                ShaderData *sd,
                                                PathRadiance *L,
@@ -629,7 +654,7 @@ kernel_volume_integrate_heterogeneous_distance(KernelGlobals *kg,
       if (L && (closure_flag & SD_EMISSION)) {
         float3 emission = kernel_volume_emission_integrate(
             &coeff, closure_flag, transmittance, dt);
-        path_radiance_accum_emission(kg, L, state, tp, emission);
+        path_radiance_accum_emission(kg, L, state, buffer, tp, emission, LIGHTGROUPS_NONE);
       }
 
       /* modify throughput */
@@ -675,6 +700,7 @@ kernel_volume_integrate_heterogeneous_distance(KernelGlobals *kg,
 ccl_device_noinline_cpu VolumeIntegrateResult
 kernel_volume_integrate(KernelGlobals *kg,
                         ccl_addr_space PathState *state,
+                        ccl_global float *buffer,
                         ShaderData *sd,
                         Ray *ray,
                         PathRadiance *L,
@@ -684,9 +710,10 @@ kernel_volume_integrate(KernelGlobals *kg,
   shader_setup_from_volume(kg, sd, ray);
 
   if (heterogeneous)
-    return kernel_volume_integrate_heterogeneous_distance(kg, state, ray, sd, L, throughput);
+    return kernel_volume_integrate_heterogeneous_distance(
+        kg, state, buffer, ray, sd, L, throughput);
   else
-    return kernel_volume_integrate_homogeneous(kg, state, ray, sd, L, throughput, true);
+    return kernel_volume_integrate_homogeneous(kg, state, buffer, ray, sd, L, throughput, true);
 }
 
 #  ifndef __SPLIT_KERNEL__
@@ -912,13 +939,13 @@ ccl_device void kernel_volume_decoupled_free(KernelGlobals *kg, VolumeSegment *s
  * function is expected to return VOLUME_PATH_SCATTERED when probalistic_scatter is false */
 ccl_device VolumeIntegrateResult kernel_volume_decoupled_scatter(KernelGlobals *kg,
                                                                  PathState *state,
-                                                                 Ray *ray,
+                                                                 const Ray *ray,
                                                                  ShaderData *sd,
                                                                  float3 *throughput,
                                                                  float rphase,
                                                                  float rscatter,
                                                                  const VolumeSegment *segment,
-                                                                 const float3 *light_P,
+                                                                 const LightSample *ls,
                                                                  bool probalistic_scatter)
 {
   kernel_assert(segment->closure_flag & SD_SCATTER);
@@ -951,7 +978,9 @@ ccl_device VolumeIntegrateResult kernel_volume_decoupled_scatter(KernelGlobals *
   bool distance_sample = true;
   bool use_mis = false;
 
-  if (segment->sampling_method && light_P) {
+  /* Apply equiangular or MIS sampling only when there is a light sample
+   * and that light sample is from a light with a physical position. */
+  if (segment->sampling_method && ls && ls->t != FLT_MAX) {
     if (segment->sampling_method == SD_VOLUME_MIS) {
       /* multiple importance sample: randomly pick between
        * equiangular and distance sampling strategy */
@@ -1019,14 +1048,14 @@ ccl_device VolumeIntegrateResult kernel_volume_decoupled_scatter(KernelGlobals *
 
     /* multiple importance sampling */
     if (use_mis) {
-      float equi_pdf = kernel_volume_equiangular_pdf(ray, *light_P, sample_t);
+      const float equi_pdf = kernel_volume_equiangular_pdf(kg, ray, ls, sample_t);
       mis_weight = 2.0f * power_heuristic(pdf, equi_pdf);
     }
   }
   /* equi-angular sampling */
   else {
     /* sample distance */
-    sample_t = kernel_volume_equiangular_sample(ray, *light_P, xi, &pdf);
+    sample_t = kernel_volume_equiangular_sample(kg, ray, ls, xi, &pdf);
 
     /* find step in which sampled distance is located */
     step = segment->steps;

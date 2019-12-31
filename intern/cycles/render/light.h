@@ -68,6 +68,7 @@ class Light : public Node {
   bool use_glossy;
   bool use_transmission;
   bool use_scatter;
+  bool is_direct;
 
   bool is_portal;
   bool is_enabled;
@@ -76,6 +77,8 @@ class Light : public Node {
   int samples;
   int max_bounces;
   uint random_id;
+
+  uint lightgroups;
 
   void tag_update(Scene *scene);
 

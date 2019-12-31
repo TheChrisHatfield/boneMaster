@@ -188,6 +188,8 @@ class CYCLES_RENDER_PT_sampling(CyclesButtonsPanel, Panel):
             col.prop(cscene, "aa_samples", text="Render")
             col.prop(cscene, "preview_aa_samples", text="Viewport")
 
+        col.prop(cscene, "use_adaptive_sampling", text="Adaptive Sampling")
+
 
 class CYCLES_RENDER_PT_sampling_sub_samples(CyclesButtonsPanel, Panel):
     bl_label = "Sub Samples"
@@ -239,7 +241,14 @@ class CYCLES_RENDER_PT_sampling_advanced(CyclesButtonsPanel, Panel):
         row.prop(cscene, "seed")
         row.prop(cscene, "use_animated_seed", text="", icon='TIME')
 
-        layout.prop(cscene, "sampling_pattern", text="Pattern")
+        col = layout.column(align=True)
+        #col.active = not(cscene.use_adaptive_sampling)
+        col.prop(cscene, "sampling_pattern", text="Pattern")
+        col.prop(cscene, "scrambling_distance")
+        col = layout.column(align=True)
+        col.active = cscene.use_adaptive_sampling
+        col.prop(cscene, "adaptive_min_samples", text="Adaptive Min Samples")
+        col.prop(cscene, "adaptive_threshold", text="Adaptive Threshold")        
 
         layout.prop(cscene, "use_square_samples")
 
@@ -803,6 +812,8 @@ class CYCLES_RENDER_PT_passes_data(CyclesButtonsPanel, Panel):
         col.prop(cycles_view_layer, "denoising_store_passes", text="Denoising Data")
         col = flow.column()
         col.prop(cycles_view_layer, "pass_debug_render_time", text="Render Time")
+        col = flow.column()
+        col.prop(cycles_view_layer, "pass_debug_sample_count", text="Sample Count")
 
         layout.separator()
 
@@ -952,6 +963,37 @@ class CYCLES_RENDER_PT_passes_aov(CyclesButtonsPanel, Panel):
           active_aov = cycles_view_layer.aovs[cycles_view_layer.active_aov]
           if active_aov.conflict:
             layout.label(text=active_aov.conflict, icon='ERROR')
+
+
+class CYCLES_RENDER_PT_lightgroups(CyclesButtonsPanel, Panel):
+    bl_label = "Lightgroups"
+    bl_context = "view_layer"
+    bl_parent_id = "CYCLES_RENDER_PT_passes"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        cycles_view_layer = context.view_layer.cycles
+
+        row = layout.row()
+        col = row.column()
+        col.template_list("UI_UL_list", "lightgroups", cycles_view_layer, "lightgroups", cycles_view_layer, "active_lightgroup", rows=3)
+
+        col = row.column()
+        sub = col.column(align=True)
+        sub.operator("cycles.lightgroup_add", icon='ADD', text="")
+        sub.operator("cycles.lightgroup_remove", icon='REMOVE', text="")
+        if len(cycles_view_layer.lightgroups) > 0:
+            sub.operator("cycles.lightgroup_move", icon='TRIA_UP', text="").direction = 'UP'
+            sub.operator("cycles.lightgroup_move", icon='TRIA_DOWN', text="").direction = 'DOWN'
+
+            lg = cycles_view_layer.lightgroups[cycles_view_layer.active_lightgroup]
+            row = layout.row()
+            col = row.column()
+            col.prop(lg, "collection")
+            col.prop(lg, "include_world")
 
 
 class CYCLES_RENDER_PT_denoising(CyclesButtonsPanel, Panel):
@@ -1279,7 +1321,11 @@ class CYCLES_OBJECT_PT_visibility_ray_visibility(CyclesButtonsPanel, Panel):
         flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, even_rows=False, align=False)
 
         col = flow.column()
-        col.prop(visibility, "camera")
+
+        if ob.type == 'LIGHT':
+            col.prop(visibility, "lamp_camera")
+        else:        
+            col.prop(visibility, "camera")
         col = flow.column()
         col.prop(visibility, "diffuse")
         col = flow.column()
@@ -1584,7 +1630,7 @@ class CYCLES_WORLD_PT_ray_visibility(CyclesButtonsPanel, Panel):
 
         flow = layout.column_flow()
 
-        flow.prop(visibility, "camera")
+        flow.prop(visibility, "camera")        
         flow.prop(visibility, "diffuse")
         flow.prop(visibility, "glossy")
         flow.prop(visibility, "transmission")
@@ -2271,6 +2317,7 @@ classes = (
     CYCLES_RENDER_PT_passes_debug,
     CYCLES_RENDER_UL_aov,
     CYCLES_RENDER_PT_passes_aov,
+    CYCLES_RENDER_PT_lightgroups,
     CYCLES_RENDER_PT_filter,
     CYCLES_RENDER_PT_override,
     CYCLES_RENDER_PT_denoising,

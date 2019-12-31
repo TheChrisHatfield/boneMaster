@@ -141,9 +141,13 @@ NODE_DEFINE(Light)
   SOCKET_BOOLEAN(use_transmission, "Use Transmission", true);
   SOCKET_BOOLEAN(use_scatter, "Use Scatter", true);
 
+  SOCKET_BOOLEAN(is_direct, "Is directly visible", false);
+
   SOCKET_INT(samples, "Samples", 1);
   SOCKET_INT(max_bounces, "Max Bounces", 1024);
   SOCKET_UINT(random_id, "Random ID", 0);
+
+  SOCKET_UINT(lightgroups, "Lightgroups", 0);
 
   SOCKET_BOOLEAN(is_portal, "Is Portal", false);
   SOCKET_BOOLEAN(is_enabled, "Is Enabled", true);
@@ -384,6 +388,7 @@ void LightManager::device_update_distribution(Device *,
   /* point lights */
   float lightarea = (totarea > 0.0f) ? totarea / num_lights : 1.0f;
   bool use_lamp_mis = false;
+  bool use_lamp_direct = false;
 
   int light_index = 0;
   foreach (Light *light, scene->lights) {
@@ -401,9 +406,11 @@ void LightManager::device_update_distribution(Device *,
     }
     else if (light->type == LIGHT_POINT || light->type == LIGHT_SPOT) {
       use_lamp_mis |= (light->size > 0.0f && light->use_mis);
+      use_lamp_direct |= (light->size > 0.0f && light->is_direct);
     }
     else if (light->type == LIGHT_AREA) {
       use_lamp_mis |= light->use_mis;
+      use_lamp_direct |= light->is_direct;
     }
     else if (light->type == LIGHT_BACKGROUND) {
       num_background_lights++;
@@ -458,6 +465,7 @@ void LightManager::device_update_distribution(Device *,
     }
 
     kintegrator->use_lamp_mis = use_lamp_mis;
+    kintegrator->use_lamp_direct = use_lamp_direct;
 
     /* bit of an ugly hack to compensate for emitting triangles influencing
      * amount of samples we get for this pass */
@@ -492,6 +500,7 @@ void LightManager::device_update_distribution(Device *,
     kintegrator->pdf_triangles = 0.0f;
     kintegrator->pdf_lights = 0.0f;
     kintegrator->use_lamp_mis = false;
+    kintegrator->use_direct_light = false;
     kintegrator->num_portals = 0;
     kintegrator->portal_offset = 0;
     kintegrator->portal_pdf = 0.0f;
@@ -686,8 +695,10 @@ void LightManager::device_update_points(Device *, DeviceScene *dscene, Scene *sc
     int max_bounces = light->max_bounces;
     float random = (float)light->random_id * (1.0f / (float)0xFFFFFFFF);
 
-    if (!light->cast_shadow)
+    if (!light->cast_shadow) {
       shader_id &= ~SHADER_CAST_SHADOW;
+    }
+      
 
     if (!light->use_diffuse) {
       shader_id |= SHADER_EXCLUDE_DIFFUSE;
@@ -705,6 +716,10 @@ void LightManager::device_update_points(Device *, DeviceScene *dscene, Scene *sc
       shader_id |= SHADER_EXCLUDE_SCATTER;
       use_light_visibility = true;
     }
+    if (!light->is_direct) {
+      shader_id |= SHADER_EXCLUDE_CAMERA;
+      use_light_visibility = true;
+    }    
 
     klights[light_index].type = light->type;
     klights[light_index].samples = light->samples;
@@ -815,8 +830,9 @@ void LightManager::device_update_points(Device *, DeviceScene *dscene, Scene *sc
 
       dir = safe_normalize(dir);
 
-      if (light->use_mis && radius > 0.0f)
+      if (light->use_mis && radius > 0.0f) {
         shader_id |= SHADER_USE_MIS;
+      }
 
       klights[light_index].co[0] = co.x;
       klights[light_index].co[1] = co.y;
@@ -838,6 +854,8 @@ void LightManager::device_update_points(Device *, DeviceScene *dscene, Scene *sc
 
     klights[light_index].tfm = light->tfm;
     klights[light_index].itfm = transform_inverse(light->tfm);
+
+    klights[light_index].lightgroups = light->lightgroups;
 
     light_index++;
   }

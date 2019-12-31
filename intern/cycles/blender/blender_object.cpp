@@ -94,6 +94,7 @@ static uint object_ray_visibility(BL::Object &b_ob)
   uint flag = 0;
 
   flag |= get_boolean(cvisibility, "camera") ? PATH_RAY_CAMERA : 0;
+  flag |= get_boolean(cvisibility, "lamp_camera") ? PATH_RAY_CAMERA : 0;
   flag |= get_boolean(cvisibility, "diffuse") ? PATH_RAY_DIFFUSE : 0;
   flag |= get_boolean(cvisibility, "glossy") ? PATH_RAY_GLOSSY : 0;
   flag |= get_boolean(cvisibility, "transmission") ? PATH_RAY_TRANSMIT : 0;
@@ -204,6 +205,10 @@ void BlenderSync::sync_light(BL::Object &b_parent,
   PointerRNA clight = RNA_pointer_get(&b_light.ptr, "cycles");
   light->cast_shadow = get_boolean(clight, "cast_shadow");
   light->use_mis = get_boolean(clight, "use_multiple_importance_sampling");
+  
+  /* camera visibility */
+	PointerRNA cvisibility = RNA_pointer_get(&b_ob.ptr, "cycles_visibility"); //Picking the one under world for the time being
+	light->is_direct = get_boolean(cvisibility, "lamp_camera");
 
   int samples = get_int(clight, "samples");
   if (get_boolean(cscene, "use_square_samples"))
@@ -235,6 +240,14 @@ void BlenderSync::sync_light(BL::Object &b_parent,
   light->use_transmission = (visibility & PATH_RAY_TRANSMIT) != 0;
   light->use_scatter = (visibility & PATH_RAY_VOLUME_SCATTER) != 0;
 
+  /* light groups */
+  if (lightgroup_map.count(b_ob.name())) {
+    light->lightgroups = lightgroup_map[b_ob.name()];
+  }
+  else {
+    light->lightgroups = LIGHTGROUPS_NONE;
+  }
+
   /* tag */
   light->tag_update(scene);
 }
@@ -250,6 +263,14 @@ void BlenderSync::sync_background_light(BL::SpaceView3D &b_v3d, bool use_portal)
     enum SamplingMethod { SAMPLING_NONE = 0, SAMPLING_AUTOMATIC, SAMPLING_MANUAL, SAMPLING_NUM };
     int sampling_method = get_enum(cworld, "sampling_method", SAMPLING_NUM, SAMPLING_AUTOMATIC);
     bool sample_as_light = (sampling_method != SAMPLING_NONE);
+
+    uint lightgroup_mask = 0;
+    for (int i = 0; i < lightgroups.size(); i++) {
+      if (lightgroups[i].second) {
+        lightgroup_mask |= (1 << i);
+      }
+    }
+    scene->integrator->background_lightgroups = lightgroup_mask;
 
     if (sample_as_light || use_portal) {
       /* test if we need to sync */
@@ -267,6 +288,7 @@ void BlenderSync::sync_background_light(BL::SpaceView3D &b_v3d, bool use_portal)
         }
         light->shader = scene->default_background;
         light->use_mis = sample_as_light;
+        light->is_direct = false;
         light->max_bounces = get_int(cworld, "max_bounces");
 
         /* force enable light again when world is resynced */
@@ -277,6 +299,8 @@ void BlenderSync::sync_background_light(BL::SpaceView3D &b_v3d, bool use_portal)
           light->samples = samples * samples;
         else
           light->samples = samples;
+
+        light->lightgroups = lightgroup_mask;
 
         light->tag_update(scene);
         light_map.set_recalc(b_world);
@@ -503,6 +527,14 @@ Object *BlenderSync::sync_object(BL::Depsgraph &b_depsgraph,
       object->random_id = hash_uint2(hash_string(object->name.c_str()), 0);
     }
 
+    /* light groups */
+    if (lightgroup_map.count(b_ob.name())) {
+      object->lightgroups = lightgroup_map[b_ob.name()];
+    }
+    else {
+      object->lightgroups = LIGHTGROUPS_NONE;
+    }
+
     object->tag_update(scene);
   }
 
@@ -537,6 +569,20 @@ void BlenderSync::sync_objects(BL::Depsgraph &b_depsgraph,
 
   /* initialize culling */
   BlenderObjectCulling culling(scene, b_scene);
+
+  /* Build lightgroup map */
+  lightgroup_map.clear();
+  for (int i = 0; i < lightgroups.size(); i++) {
+    BL::Collection &b_collection = lightgroups[i].first;
+    if (b_collection) {
+      BL::Collection::all_objects_iterator b_object_iter;
+      for (b_collection.all_objects.begin(b_object_iter);
+           b_object_iter != b_collection.all_objects.end();
+           ++b_object_iter) {
+        lightgroup_map[b_object_iter->name()] |= (1 << i);
+      }
+    }
+  }
 
   /* object loop */
   bool cancel = false;

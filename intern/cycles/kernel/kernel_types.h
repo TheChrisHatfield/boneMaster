@@ -51,6 +51,8 @@ CCL_NAMESPACE_BEGIN
 #define BSSRDF_MAX_BOUNCES 256
 #define LOCAL_MAX_HITS 4
 
+#define LIGHTGROUPS_MAX 32
+
 #define VOLUME_BOUNDS_MAX 1024
 
 #define BECKMANN_TABLE_SIZE 256
@@ -60,8 +62,11 @@ CCL_NAMESPACE_BEGIN
 #define PRIM_NONE (~0)
 #define LAMP_NONE (~0)
 #define ID_NONE (0.0f)
+#define LIGHTGROUPS_NONE 0
 
-#define VOLUME_STACK_SIZE 32
+#define VOLUME_STACK_SIZE	32
+#define RNG_DITHER_MASK 0x80000000
+#define RNG_DITHER_SIZE 128
 
 /* Split kernel constants */
 #define WORK_POOL_SIZE_GPU 64
@@ -269,6 +274,7 @@ enum PathTraceDimension {
 enum SamplingPattern {
   SAMPLING_PATTERN_SOBOL = 0,
   SAMPLING_PATTERN_CMJ = 1,
+  SAMPLING_PATTERN_PMJ = 2,
 
   SAMPLING_NUM_PATTERNS,
 };
@@ -375,6 +381,8 @@ typedef enum PassType {
   PASS_CRYPTOMATTE,
   PASS_AOV_COLOR,
   PASS_AOV_VALUE,
+  PASS_ADAPTIVE_AUX_BUFFER,
+  PASS_SAMPLE_COUNT,
   PASS_CATEGORY_MAIN_END = 31,
 
   PASS_MIST = 32,
@@ -398,6 +406,7 @@ typedef enum PassType {
   PASS_VOLUME_DIRECT,
   PASS_VOLUME_INDIRECT,
   /* No Scatter color since it's tricky to define what it would even mean. */
+  PASS_LIGHTGROUP,
   PASS_CATEGORY_LIGHT_END = 63,
 } PassType;
 
@@ -1239,6 +1248,12 @@ typedef struct KernelFilm {
   int cryptomatte_depth;
   int pass_cryptomatte;
 
+  int pass_adaptive_aux_buffer;
+  int pass_sample_count;  
+
+  int pass_lightgroup;
+  int num_lightgroups;
+
   int pass_mist;
   float mist_start;
   float mist_inv_depth;
@@ -1250,8 +1265,8 @@ typedef struct KernelFilm {
 
   int pass_aov_color;
   int pass_aov_value;
-  int pad1;
-  int pad2;
+  //int pad1;
+  //int pad2;
 
   /* XYZ to rendering color space transform. float4 instead of float3 to
    * ensure consistent padding/alignment across devices. */
@@ -1273,6 +1288,8 @@ typedef struct KernelFilm {
   int display_divide_pass_stride;
   int use_display_exposure;
   int use_display_pass_alpha;
+
+  //int pad1, pad2;//, pad3;
 } KernelFilm;
 static_assert_align(KernelFilm, 16);
 
@@ -1350,10 +1367,15 @@ typedef struct KernelIntegrator {
 
   /* mis */
   int use_lamp_mis;
+  int use_lamp_direct;
 
   /* sampler */
   int sampling_pattern;
   int aa_samples;
+  float scrambling_distance;
+  int dither_size;
+  int adaptive_min_samples;
+  float adaptive_threshold;  
 
   /* volume render */
   int use_volumes;
@@ -1365,7 +1387,9 @@ typedef struct KernelIntegrator {
 
   int max_closures;
 
-  int pad1;
+  uint background_lightgroups;
+
+  int pad1, pad2, pad3; //I added Scramble and dither_size, with this we need 3 pads
 } KernelIntegrator;
 static_assert_align(KernelIntegrator, 16);
 
@@ -1455,6 +1479,7 @@ typedef struct KernelObject {
   float random_number;
   float color[3];
   int particle_index;
+  uint lightgroups;
 
   float dupli_generated[3];
   float dupli_uv[2];
@@ -1469,6 +1494,8 @@ typedef struct KernelObject {
 
   float cryptomatte_object;
   float cryptomatte_asset;
+
+  int pad[3];
 } KernelObject;
 static_assert_align(KernelObject, 16);
 
@@ -1507,7 +1534,7 @@ typedef struct KernelLight {
   float max_bounces;
   float random;
   float strength[3];
-  float pad1;
+  uint lightgroups;
   Transform tfm;
   Transform itfm;
   union {
